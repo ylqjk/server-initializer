@@ -1,0 +1,164 @@
+# Initialize the server
+# cf. http://morizyun.github.io/blog/sakura-vps-centos63-ssh-setup/
+#     http://akiyoko.hatenablog.jp/entry/2013/12/16/020529
+
+- hosts: servers-root
+  sudo: true
+  vars_prompt:
+    - name: username
+      prompt: enter new username
+      default: ylqjk
+    - name: password
+      prompt: enter new password
+      private: yes
+      confirm: true
+    - name: ssh_port
+      prompt: enter new ssh port
+      default: 22
+    - name: key_path
+      prompt: enter authorized public key
+      default: ~/.ssh/id_rsa.pub
+  tasks:
+    - name: update the yum packages
+      yum: name=* state=latest
+
+    - name: generate a password of a new user
+      shell: openssl passwd -salt {{ username }}_salt -1 {{ password }}
+      register: encrypted_password
+    - name: add a new user
+      user: name={{ username }} password={{ encrypted_password.stdout }} shell=/bin/bash state=present append=yes groups=wheel
+    - name: register a public key file
+      authorized_key: user={{ username }} key="{{ lookup('file', key_path) }}"
+
+    - name: give a sudoer to the user (/etc/pam.d/su)
+      lineinfile: dest=/etc/pam.d/su regexp="^#\s*(auth\s+required\s+pam_wheel.so\s+use_uid)" line="\1" backrefs=yes state=present
+    - name: give a sudoer to the user (/etc/login.defs)
+      lineinfile: dest=/etc/login.defs regexp="" insertafter=EOF line="SU_WHEEL_ONLY yes"
+    - name: give a sudoer to the user (/etc/sudoers)
+      lineinfile: dest=/etc/sudoers regexp="^#\s*(%wheel\s+ALL=\(ALL\)\s+ALL)" line="\1" backrefs=yes state=present
+
+    - name: disallow ssh login with root
+      lineinfile: dest=/etc/ssh/sshd_config regexp="^#?\s*(PermitRootLogin)\s*[yesno]+" line="\1 no" backrefs=yes state=present
+      notify:
+        - restart sshd
+    - name: disallow password authentication
+      lineinfile: dest=/etc/ssh/sshd_config regexp="^#?\s*(PasswordAuthentication)\s*[yesno]+" line="\1 no" backrefs=yes state=present
+      notify:
+        - restart sshd
+
+    - name: create an iptables
+      template: src=.iptables dest=/etc/sysconfig/iptables
+      notify:
+        - restart iptables
+
+    - name: change a port number for ssh (/etc/ssh/sshd_config)
+      lineinfile: dest=/etc/ssh/sshd_config regexp="^#?\s*(Port)\s*[0-9]+" line="\1 {{ ssh_port }}" backrefs=yes state=present
+      notify:
+        - restart sshd
+    - name: change a port number for ssh (/etc/sysconfig/iptables)
+      lineinfile: dest=/etc/sysconfig/iptables regexp="^(-A RH-Firewall-1-INPUT -m state --state NEW -m tcp -p tcp --dport) 22 (-j ACCEPT)$" line="\1 {{ ssh_port }} \2" backrefs=yes state=present
+      notify:
+        - restart iptables
+
+  handlers:
+    - name: restart iptables
+      service: name=iptables state=restarted enabled=yes
+
+    - name: restart sshd
+      service: name=sshd state=restarted
+
+
+# Initialize the rails server
+# cf. http://morizyun.github.io/blog/postgresql-mac-centos-rails/
+#     http://qiita.com/imp954sti/items/117de9ebac7d2a4a16f5
+
+- hosts: rails-servers
+  vars_prompt:
+    - name: email
+      prompt: enter your email address
+  vars:
+    required_ruby_version: "2.1.2"
+  tasks:
+    - name: install logwatch package
+      sudo: true
+      yum: name=logwatch state=latest
+    - name: create /usr/local/log directory
+      sudo: true
+      file: path=/usr/local/log state=directory owner=root group=root mode=0755
+    - name: create /usr/local/log/logwatch directory
+      sudo: true
+      file: path=/usr/local/log/logwatch state=directory owner=root group=root mode=0755
+    - name: set logwatch email address
+      sudo: true
+      lineinfile: dest=/etc/logwatch/conf/logwatch.conf regexp="^MailTo" insertafter=EOF line="MailTo = {{ email }}"
+
+    - name: install denyhosts package
+      sudo: true
+      yum: name=denyhosts enablerepo=epel state=latest
+    - name: start denyhosts
+      sudo: true
+      service: name=denyhosts state=started enabled=yes
+    - name: register denyhosts
+      sudo: true
+      shell: chkconfig denyhosts on
+
+    # - name: register postgresql repository
+    #   sudo: true
+    #   command: rpm -ivh http://yum.postgresql.org/9.3/redhat/rhel-6-i386/pgdg-centos93-9.3-1.noarch.rpm
+    - name: register postgresql repository
+      sudo: true
+      yum: name=http://yum.postgresql.org/9.3/redhat/rhel-6-i386/pgdg-centos93-9.3-1.noarch.rpm state=present
+    - name: install postgresql packages
+      sudo: true
+      yum: name={{ item }} state=latest
+      with_items:
+        - postgresql93-server
+        - postgresql93-devel
+        - postgresql93-contrib
+    - name: initialize database
+      sudo: true
+      shell: service postgresql-9.3 initdb --encoding=UTF8 --no-locale
+    - name: start postgresql
+      sudo: true
+      service: name=postgresql-9.3 state=started enabled=yes
+    - name: register postgresql
+      sudo: true
+      shell: chkconfig postgresql-9.3 on
+
+    - name: register nginx repository
+      sudo: true
+      yum: name=http://nginx.org/packages/centos/6/noarch/RPMS/nginx-release-centos-6-0.el6.ngx.noarch.rpm state=present
+    # - name: register nginx repository
+    #   sudo: true
+    #   command: rpm -ivh http://nginx.org/packages/centos/6/noarch/RPMS/nginx-release-centos-6-0.el6.ngx.noarch.rpm
+    - name: install nginx package
+      sudo: true
+      yum: name=nginx state=latest
+
+    - name: install packages that are used to compile ruby
+      sudo: true
+      yum: name={{ item }} state=latest
+      with_items:
+        - git
+        - openssl-devel
+        - readline-devel
+        - zlib-devel
+    - name: get rbenv
+      git: repo=https://github.com/sstephenson/rbenv.git dest=~/.rbenv
+    - name: get ruby-build plugin
+      git: repo=https://github.com/sstephenson/ruby-build.git dest=~/.rbenv/plugins/ruby-build
+    - name: add rbenv path
+      lineinfile: dest=~/.bashrc regexp="^export PATH=\$HOME\/\.rbenv\/bin\:\$PATH$" insertbefore=BOF line="export PATH=$HOME/.rbenv/bin:$PATH"
+    - name: add rbenv init command
+      lineinfile: dest=~/.bashrc regexp="^eval \"\$\(rbenv init -\)\"" insertafter="^export PATH=\$HOME\/\.rbenv\/bin\:\$PATH$" line='eval "$(rbenv init -)"'
+
+    - name: check if ruby is installed
+      shell: cd; bash -lc "source $HOME/.bashrc; rbenv versions | grep {{ required_ruby_version }} | tr '*' ' ' | sed -e 's/\s\+//' | cut -f1 -d' '"
+      register: installed_ruby_version
+    - name: install ruby
+      shell: cd; bash -lc "source $HOME/.bashrc; CONFIGURE_OPTS=--disable-install-rdoc rbenv install {{ required_ruby_version }}"
+      when: installed_ruby_version.stdout != required_ruby_version
+    - name: be sure target ruby is default
+      shell: cd; bash -lc "source $HOME/.bashrc; rbenv global {{ required_ruby_version }}"
+    - name: install bundler gem
+      shell: cd; bash -lc "source $HOME/.bashrc; gem install bundler; rbenv rehash"

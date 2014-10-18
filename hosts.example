@@ -1,0 +1,5 @@
+[servers-root]
+vagrant-default ansible_ssh_user=vagrant # Vagrant example
+
+[rails-servers]
+vagrant-ylqjk ansible_ssh_user=ylqjk # Vagrant example
